@@ -165,6 +165,36 @@ class TestAlgorithms:
             with pytest.raises(InvalidKeyError):
                 algo.from_jwk(keyfile.read())
 
+    @pytest.mark.parametrize("empty_key", ["", b""])
+    def test_hmac_prepare_key_rejects_empty_key(self, empty_key):
+        algo = HMACAlgorithm(HMACAlgorithm.SHA256)
+
+        with pytest.raises(InvalidKeyError, match="must not be empty"):
+            algo.prepare_key(empty_key)
+
+    @pytest.mark.parametrize(
+        "jwk_file",
+        [
+            "jwk_rsa_pub.json",
+            "jwk_ec_pub_P-256.json",
+            "jwk_okp_pub_Ed25519.json",
+            "jwk_hmac.json",
+        ],
+    )
+    def test_hmac_prepare_key_rejects_jwk_json(self, jwk_file):
+        algo = HMACAlgorithm(HMACAlgorithm.SHA256)
+
+        with open(key_path(jwk_file)) as keyfile:
+            with pytest.raises(InvalidKeyError, match="looks like a JWK"):
+                algo.prepare_key(keyfile.read())
+
+    def test_hmac_prepare_key_accepts_json_without_kty(self):
+        # JSON that doesn't look like a JWK (no "kty") should not be misclassified.
+        algo = HMACAlgorithm(HMACAlgorithm.SHA256)
+
+        key = algo.prepare_key('{"this": "is just a json-shaped secret"}')
+        assert key == b'{"this": "is just a json-shaped secret"}'
+
     @crypto_required
     @pytest.mark.parametrize(
         "key_format_name",

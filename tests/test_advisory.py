@@ -1,10 +1,15 @@
+import hashlib
+import hmac
+import json
+
 import pytest
 
 import jwt
 from jwt.algorithms import get_default_algorithms
 from jwt.exceptions import InvalidKeyError
+from jwt.utils import base64url_encode
 
-from .utils import crypto_required
+from .utils import crypto_required, key_path
 
 priv_key_bytes = b"""-----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEIIbBhdo2ah7X32i50GOzrCr4acZTe6BezUdRIixjTAdL
@@ -117,3 +122,50 @@ class TestAdvisory:
                 ssh_key_bytes,
                 algorithms=algorithm_names,
             )
+
+    @staticmethod
+    def _forge_hs256(secret):
+        header_b64 = base64url_encode(
+            json.dumps({"typ": "JWT", "alg": "HS256"}, separators=(",", ":")).encode()
+        )
+        payload_b64 = base64url_encode(json.dumps({"sub": "attacker"}).encode())
+        signing_input = b".".join([header_b64, payload_b64])
+        signature = hmac.new(secret, signing_input, hashlib.sha256).digest()
+        return b".".join([signing_input, base64url_encode(signature)]).decode()
+
+    @pytest.mark.parametrize(
+        "jwk_file",
+        ["jwk_rsa_pub.json", "jwk_ec_pub_P-256.json", "jwk_okp_pub_Ed25519.json"],
+    )
+    def test_hmac_rejects_public_jwk_json_as_secret(self, jwk_file):
+        # Algorithm confusion: when the raw JSON of a public JWK reaches
+        # decode() as the key, an attacker who knows that public JWK can set
+        # alg=HS256 and sign with its bytes as the HMAC secret. The forged
+        # token must not verify.
+        with open(key_path(jwk_file), "rb") as keyfile:
+            jwk_bytes = keyfile.read()
+
+        forged = self._forge_hs256(jwk_bytes)
+        algorithm_names = list(get_default_algorithms())
+
+        with pytest.raises(InvalidKeyError, match="looks like a JWK"):
+            jwt.decode(forged, jwk_bytes, algorithms=algorithm_names)
+
+        with pytest.raises(InvalidKeyError, match="looks like a JWK"):
+            jwt.decode(forged, jwk_bytes.decode("utf-8"), algorithms=["HS256"])
+
+    def test_hmac_rejects_empty_secret(self):
+        # An empty HMAC secret lets anybody mint tokens that verify. Tokens
+        # forged with an empty key must be rejected, including when the
+        # caller relies on the default (empty) key argument.
+        forged = self._forge_hs256(b"")
+
+        for empty_key in ("", b""):
+            with pytest.raises(InvalidKeyError, match="must not be empty"):
+                jwt.decode(forged, empty_key, algorithms=["HS256"])
+
+        with pytest.raises(InvalidKeyError, match="must not be empty"):
+            jwt.decode(forged, algorithms=["HS256"])
+
+        with pytest.raises(InvalidKeyError, match="must not be empty"):
+            jwt.encode({"sub": "attacker"}, "", algorithm="HS256")
